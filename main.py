@@ -11,6 +11,11 @@ from matplotlib import pyplot as plt
 
 from jinja2 import Environment, FileSystemLoader
 import pdfkit
+import keyboard
+from prettytable import PrettyTable
+
+
+# <---------------------------------------------------Отчёт-------------------------------------------------------->
 
 
 class UserInput:
@@ -326,11 +331,289 @@ class Report:
         pdfkit.from_string(pdf_template, 'report.pdf', configuration=config, options={"enable-local-file-access": None})
 
 
-params = UserInput()
-vacs = DataSet(params.file_name).vacancies_objects
-params.print_data(vacs, params.profession)
-salary_by_cities, salary_by_years, vacancies_counts_by_years, vacancies_salary_by_years, vacs_by_cities, \
-vacancies_by_years = UserInput.get_data(vacs, params.profession)
-Report.generate_excel(params.profession)
-Report.generate_graphs(params.profession)
-Report.generate_pdf(params.profession)
+# <---------------------------------------------------Таблицы-------------------------------------------------------->
+
+def get_user_input():
+    error_index = -1
+    global is_need_to_print
+    file_name = input("Введите название файла: ")
+    filter_param = input("Введите параметр фильтрации: ")
+    sort_param = input("Введите параметр сортировки: ")
+    is_reversed_sort = input("Обратный порядок сортировки (Да / Нет): ")
+    filter_param, error_index, is_reversed_sort = is_correct_inputs(filter_param, error_index, is_reversed_sort,
+                                                                    sort_param)
+    table_range = input("Введите диапазон вывода: ").split()
+    cols_filter = input("Введите требуемые столбцы: ").split(", ")
+    if error_index >= 0:
+        print(errors[error_index])
+    return file_name, filter_param, sort_param, is_reversed_sort, table_range, cols_filter, is_need_to_print
+
+
+def is_correct_inputs(filter_param, error_index, is_reverse_sort, sort_parameter):
+    global is_need_to_print
+
+    if filter_param != "" and ":" not in filter_param:
+        error_index = 0
+        is_need_to_print = False
+    elif filter_param != "" and not filter_param.split(": ")[0] in filter_types:
+        error_index = 1
+        is_need_to_print = False
+    else:
+        filter_param = filter_param.split(": ")
+
+    if sort_parameter not in filter_types:
+        error_index = 2
+        is_need_to_print = False
+    if is_reverse_sort not in reverse_parameter:
+        error_index = 3
+        is_need_to_print = False
+    else:
+        is_reverse_sort = reverse_parameter[is_reverse_sort]
+
+    return filter_param, error_index, is_reverse_sort
+
+
+def check_skills(row, words):
+    current_count = 0
+    words = words.split(", ")
+    check_count = len(words)
+    row = row.split("*- ")
+    for x in words:
+        if x in row:
+            current_count += 1
+    return current_count == check_count
+
+
+def filter_row(row, words_filter):
+    key, value = "", ""
+    if words_filter != "":
+        for k, v in words_filter.items():
+            key = k
+            value = v
+    is_need_to_print = False
+    if key in list(filter_types.keys()):
+        is_need_to_print = filter_types[key](row, value)
+    if is_need_to_print:
+        return row
+    return
+
+
+def check_inputs(table):
+    if len(table_range) >= 1 and int(table_range[0]) <= len(table.rows):
+        start_row = int(table_range[0]) - 1
+    else:
+        start_row = 0
+    if len(table_range) == 2 and int(table_range[0]) <= len(table.rows) and int(table_range[1]) >= int(table_range[0]):
+        end_row = int(table_range[1]) - 1
+    else:
+        end_row = len(table.rows)
+    if cols_filter[0] != '':
+        titles = ["№"] + cols_filter
+    else:
+        titles = table.field_names
+    return start_row, end_row, titles
+
+
+def format_row(row):
+    formatted_row = {}
+    for x in ru_words:
+        if x in functions:
+            formatted_row[ru_words[x]] = functions[x](row)
+        else:
+            formatted_row[ru_words[x]] = row[x]
+        if len(formatted_row[ru_words[x]]) >= 102:
+            formatted_row[ru_words[x]] = functions["check_length"](formatted_row, ru_words[x])
+    return formatted_row
+
+
+def parse_row(row, name):
+    parsed_row = dict(zip(name, row))
+    for x in parsed_row:
+        if x == "name":
+            parsed_row[x] = " ".join(parsed_row[x].split())
+        if x == "description":
+            parsed_row[x] = " ".join((re.sub(r'\<[^>]*\>', '', parsed_row[x])).split())
+        elif x == "key_skills":
+            parsed_row[x] = parsed_row[x].replace("\n", "*- ")
+        elif x == "premium" or x == "salary_gross":
+            parsed_row[x] = parsed_row[x].replace("True", "Да")
+            parsed_row[x] = parsed_row[x].replace("False", "Нет")
+    return parsed_row
+
+
+def universal_parser(f):
+    def wrapper(name):
+        res = f(name)
+        if res is not None:
+            print_vacancies(res, ru_words)
+
+    return wrapper
+
+
+@universal_parser
+def сsv_reader(file_name):
+    file_csv = open(file_name, encoding="utf_8_sig")
+    list_data = [x for x in csv.reader(file_csv)]
+    if len(list_data) == 0:
+        print("Пустой файл")
+        columns, result = [], ["error"]
+    elif len(list_data) == 1:
+        print("Нет данных")
+        columns, result = list_data[0], ["error"]
+    else:
+        columns = list_data[0]
+        result = [x for x in list_data[1:] if len(x) == len(columns) and x.count('') == 0]
+    if result[0] != "error" and is_need_to_print:
+        is_empty = len(result) == 0
+        for x in range(len(result)):
+            result[x] = filter_row(parse_row(result[x], columns), filter_param)
+        result = [x for x in result if x is not None]
+        if len(result) == 0 and is_empty is False:
+            print("Ничего не найдено")
+        else:
+            result = sort_types[sort_parameter](result, is_reverse_sort)
+        return result
+
+
+def print_vacancies(data_vacancies, ru_words):
+    if len(data_vacancies) == 0:
+        return
+    table = PrettyTable()
+    table._max_width = {x: 20 for x in (["№"] + list(ru_words.values()))}
+    table.field_names = ["№"] + list(ru_words.values())
+    table.align = "l"
+    table.hrules = True
+    i = 0
+    for x in range(len(data_vacancies)):
+        i += 1
+        formatted = list(format_row(data_vacancies[x]).values())
+        formatted.insert(0, x + 1)
+        table.add_row(formatted)
+    start_row, end_row, titles, = check_inputs(table)
+    if is_need_to_print:
+        print(table.get_string(start=start_row, end=end_row, fields=titles))
+
+def get_key(d, value):
+    for k, v in d.items():
+        if v == value:
+            return k
+
+errors = ["Формат ввода некорректен",
+          "Параметр поиска некорректен",
+          "Параметр сортировки некорректен",
+          "Порядок сортировки задан некорректно"]
+salary_gross_dic = {"Нет": "С вычетом налогов",
+                    "Да": "Без вычета налогов"}
+
+ru_words = {"name": "Название",
+            "description": "Описание",
+            "key_skills": "Навыки",
+            "experience_id": "Опыт работы",
+            "premium": "Премиум-вакансия",
+            "employer_name": "Компания",
+            "a": "Оклад",
+            "area_name": "Название региона",
+            "published_at": "Дата публикации вакансии"}
+ru_exp = {"noExperience": "Нет опыта",
+          "between1And3": "От 1 года до 3 лет",
+          "between3And6": "От 3 до 6 лет",
+          "moreThan6": "Более 6 лет"}
+ru_currency = {"AZN": "Манаты",
+               "BYR": "Белорусские рубли",
+               "EUR": "Евро",
+               "GEL": "Грузинский лари",
+               "KGS": "Киргизский сом",
+               "KZT": "Тенге",
+               "RUR": "Рубли",
+               "UAH": "Гривны",
+               "USD": "Доллары",
+               "UZS": "Узбекский сум"}
+currency_to_rub = {"AZN": 35.68,
+                   "BYR": 23.91,
+                   "EUR": 59.90,
+                   "GEL": 21.74,
+                   "KGS": 0.76,
+                   "KZT": 0.13,
+                   "RUR": 1,
+                   "UAH": 1.64,
+                   "USD": 60.66,
+                   "UZS": 0.0055}
+sort_exp = {"noExperience": 0,
+            "between1And3": 1,
+            "between3And6": 2,
+            "moreThan6": 3}
+filter_types = {"Название": lambda row, words: row["name"] == words,
+                "Описание": lambda row, words: row["description"] == words,
+                "Навыки": lambda row, words: check_skills(row["key_skills"], words),
+                "Опыт работы": lambda row, words: get_key(ru_exp, words) == row["experience_id"],
+                "Премиум-вакансия": lambda row, words: words in row["premium"],
+                "Компания": lambda row, words: row["employer_name"] == words,
+                "Идентификатор валюты оклада": lambda row, words: get_key(ru_currency, words) == row["salary_currency"],
+                "Оклад": lambda row, words: int(float(row["salary_from"])) <= int(words) <= int(
+                    float(row["salary_to"])),
+                "Название региона": lambda row, words: words in row["area_name"],
+                "Дата публикации вакансии": lambda row, words: functions["published_at"](row) == words,
+                "": lambda row, words: row}
+sort_types = {"Название": lambda row, revers: sorted(row, key=lambda d: d["name"], reverse=revers),
+                "Описание": lambda row, revers: sorted(row, key=lambda d: d["description"], reverse=revers),
+                "Навыки": lambda row, revers: sorted(row, key=lambda d: len(d["key_skills"].split("*- ")),
+                                                     reverse=revers),
+                "Опыт работы": lambda row, revers: sorted(row, key=lambda d: sort_exp[d["experience_id"]],
+                                                          reverse=revers),
+                "Премиум-вакансия": lambda row, revers: sorted(row, key=lambda d: d["premium"], reverse=revers),
+                "Компания": lambda row, revers: sorted(row, key=lambda d: d["employer_name"], reverse=revers),
+                "Идентификатор валюты оклада": lambda row, revers: sorted(row, key=lambda d:
+                ru_currency[d["salary_currency"]], reverse=revers),
+                "Оклад": lambda row, revers: sorted(row, key=lambda d:
+                (int(float(d["salary_from"])) + int(float(d["salary_to"]))) / 2 * currency_to_rub[d["salary_currency"]],
+                                                    reverse=revers),
+              "Название региона": lambda row, revers: sorted(row, key=lambda d: d["area_name"], reverse=revers),
+              "Дата публикации вакансии": lambda row, revers: sorted(row, key=lambda d: functions["for_sort_date"](d),
+                                                                       reverse=revers),
+              "": lambda row, words: row}
+reverse_parameter = {"Нет": False,
+                     "Да": True,
+                     "": False}
+functions = {"key_skills": lambda row: row["key_skills"].replace("*- ", "\n"),
+             "a": lambda row: "{0:,} - {1:,} ({2}) ({3})".format(int(float(row["salary_from"])),
+                                                                 int(float(row["salary_to"])),
+                                                                 ru_currency[row["salary_currency"]],
+                                                                 salary_gross_dic[row["salary_gross"]]).replace(",",
+                                                                                                                " "),
+             "experience_id": lambda row: ru_exp[row["experience_id"]],
+             "published_at": lambda row: datetime.datetime.strptime(row["published_at"], "%Y-%m-%dT%H:%M:%S%z")
+             .strftime("%d.%m.%Y"),
+             "for_sort_date": lambda row: datetime.datetime.strptime(row["published_at"], "%Y-%m-%dT%H:%M:%S%z")
+             .strftime("%Y.%m.%d.%H.%M.%S"),
+             "check_length": lambda row, name: row[name][0:100] + " ..." if row[name][101] == " " and row[name][
+                 100] == " " else row[name][
+                                  0:100] + "..."
+             }
+
+print("Выберите действие и нажмите клавишу:")
+print("1. Показать данные в виде таблицы.")
+print("2. Распечатать отчёт в виде PDF")
+
+while True:
+    if keyboard.is_pressed('1'):
+        table_range = []
+        cols_filter = ['']
+        filter_param = ""
+        is_need_to_print = True
+
+        file_name, filter_param, sort_parameter, is_reverse_sort, table_range, cols_filter, is_need_to_print = get_user_input()
+        if is_need_to_print:
+            filter_param = {filter_param[x]: filter_param[x + 1] for x in range(len(filter_param) - 1)}
+            сsv_reader(file_name)
+        break
+    elif keyboard.is_pressed('2'):
+        params = UserInput()
+        vacs = DataSet(params.file_name).vacancies_objects
+        params.print_data(vacs, params.profession)
+        salary_by_cities, salary_by_years, vacancies_counts_by_years, vacancies_salary_by_years, vacs_by_cities, \
+        vacancies_by_years = UserInput.get_data(vacs, params.profession)
+        Report.generate_excel(params.profession)
+        Report.generate_graphs(params.profession)
+        Report.generate_pdf(params.profession)
+        break
+
